@@ -76,5 +76,5 @@ if __name__ == "__main__":
 
         es_valido = validar_expediente(expediente)
         print("\n¿El expediente es válido?", es_valido)
-    except ValueError as e:
+    except ValueError as e: 
         print("Error al generar expediente:", e)

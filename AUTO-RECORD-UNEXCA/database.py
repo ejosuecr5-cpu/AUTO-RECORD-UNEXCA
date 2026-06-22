@@ -126,13 +126,70 @@ def buscar_expediente_por_sha(sha):
         cedula, pnf_id = row
         return buscar_estudiante(cedula, pnf_id)
 
-def obtener_notas_recientes(limit=30):
+def listar_estudiantes_con_inscripciones():
     """
-    Retorna las últimas notas cargadas.
-    Lista de (cedula, estudiante, pnf, materia, nota, estado, periodo, fecha_registro).
+    Retorna todos los estudiantes con sus PNF inscritos.
+    Lista de (cedula, nombre, apellido, [pnf_nombre, ...]).
     """
     with sqlite3.connect(DB_PATH) as conn:
-        return conn.execute("""
+        estudiantes = conn.execute(
+            "SELECT id, cedula, nombre, apellido FROM estudiantes ORDER BY apellido, nombre"
+        ).fetchall()
+        result = []
+        for est_id, cedula, nombre, apellido in estudiantes:
+            pnfs = conn.execute("""
+                SELECT p.nombre FROM inscripciones i
+                JOIN pnf p ON i.pnf_id = p.id
+                WHERE i.estudiante_id = ?
+                ORDER BY p.nombre
+            """, (est_id,)).fetchall()
+            result.append((cedula, nombre, apellido, [r[0] for r in pnfs]))
+        return result
+
+def obtener_notas_estudiante(cedula):
+    """
+    Retorna todas las notas de un estudiante agrupadas por PNF.
+    Dict: { pnf_nombre: [ {codigo, unidad_curricular, nota, estado, trayecto, modulo}, ... ] }
+    """
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        est = cur.execute("SELECT id FROM estudiantes WHERE cedula = ?", (cedula,)).fetchone()
+        if not est:
+            return {}
+        est_id = est[0]
+        filas = cur.execute("""
+            SELECT p.nombre, uc.codigo, uc.nombre, mc.nota, mc.estado, uc.trayecto, uc.modulo
+            FROM materias_cursadas mc
+            JOIN pnf p ON mc.pnf_id = p.id
+            JOIN unidades_curriculares uc ON mc.unidad_id = uc.id
+            WHERE mc.estudiante_id = ?
+            ORDER BY p.nombre, uc.trayecto, uc.modulo, uc.codigo
+        """, (est_id,)).fetchall()
+        result = {}
+        for pnf, codigo, nombre, nota, estado, trayecto, modulo in filas:
+            result.setdefault(pnf, []).append({
+                "codigo": codigo, "unidad_curricular": nombre,
+                "nota": nota, "estado": estado,
+                "trayecto": trayecto, "modulo": modulo
+            })
+        return result
+
+def obtener_notas_recientes(limit=50, cedula=None, materia=None):
+    """
+    Retorna notas cargadas con filtros opcionales.
+    Lista de (cedula, estudiante, pnf, materia, nota, estado, periodo, fecha_registro).
+    """
+    condiciones, params = [], []
+    if cedula:
+        condiciones.append("e.cedula LIKE ?")
+        params.append(f"%{cedula}%")
+    if materia:
+        condiciones.append("uc.nombre LIKE ?")
+        params.append(f"%{materia}%")
+    where = ("WHERE " + " AND ".join(condiciones)) if condiciones else ""
+    params.append(limit)
+    with sqlite3.connect(DB_PATH) as conn:
+        return conn.execute(f"""
             SELECT e.cedula,
                    e.nombre || ' ' || e.apellido,
                    p.nombre,
@@ -145,9 +202,10 @@ def obtener_notas_recientes(limit=30):
             JOIN estudiantes e  ON mc.estudiante_id = e.id
             JOIN pnf p          ON mc.pnf_id = p.id
             JOIN unidades_curriculares uc ON mc.unidad_id = uc.id
+            {where}
             ORDER BY mc.fecha_registro DESC
             LIMIT ?
-        """, (limit,)).fetchall()
+        """, params).fetchall()
 
 # ── usuarios ───────────────────────────────────────────────────────────────────
 

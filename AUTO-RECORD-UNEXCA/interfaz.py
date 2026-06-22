@@ -40,7 +40,7 @@ class App(ctk.CTk):
 
     def mostrar_login(self):
         self._limpiar()
-        self.geometry("480x340")
+        self.geometry("1080x720")
 
         ctk.CTkLabel(
             self, text="AUTO-RECORD UNEXCA",
@@ -349,7 +349,7 @@ class App(ctk.CTk):
 
     def mostrar_modulo_admin(self):
         self._limpiar()
-        self.geometry("700x520")
+        self.geometry("860x560")
 
         # encabezado
         header = ctk.CTkFrame(self, fg_color="transparent")
@@ -372,48 +372,192 @@ class App(ctk.CTk):
         tabs = ctk.CTkTabview(self)
         tabs.pack(fill="both", expand=True, padx=20, pady=12)
 
-        # tab notas recientes
-        tab_notas = tabs.add("Notas Recientes")
-        self._construir_tab_notas(tab_notas)
+        tab_est = tabs.add("Estudiantes")
+        self._construir_tab_estudiantes(tab_est)
+
+        tab_hist = tabs.add("Historial de Notas")
+        self._construir_tab_historial(tab_hist)
 
         # tab gestión de usuarios (solo admin)
         if self._rol_actual == "admin":
             tab_users = tabs.add("Gestión de Usuarios")
             self._construir_tab_usuarios(tab_users)
 
-    def _construir_tab_notas(self, parent):
+    # ── tab estudiantes ─────────────────────────────────────────────────────────
+
+    def _construir_tab_estudiantes(self, parent):
+        # cabecera de columnas
         cab = ctk.CTkFrame(parent, fg_color="transparent")
         cab.pack(fill="x", padx=8, pady=(10, 2))
-        for i, (txt, w) in enumerate([("Cédula", 90), ("Estudiante", 180), ("PNF", 150),
-                                       ("Materia", 200), ("Nota", 50), ("Estado", 90), ("Período", 80)]):
+        for i, (txt, w) in enumerate([("Cédula", 100), ("Nombre", 180), ("Carreras inscritas", 320), ("", 90)]):
             ctk.CTkLabel(
                 cab, text=txt, width=w,
                 font=ctk.CTkFont(size=11, weight="bold"), text_color="gray"
-            ).grid(row=0, column=i, padx=2)
+            ).grid(row=0, column=i, padx=3)
 
-        lista = ctk.CTkScrollableFrame(parent, height=320)
+        lista = ctk.CTkScrollableFrame(parent)
         lista.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
-        filas = database.obtener_notas_recientes(30)
-        if not filas:
+        estudiantes = database.listar_estudiantes_con_inscripciones()
+
+        if not estudiantes:
             ctk.CTkLabel(
-                lista, text="No hay notas cargadas aún.",
+                lista, text="No hay estudiantes registrados aún.",
                 font=ctk.CTkFont(size=12), text_color="gray"
             ).pack(pady=20)
             return
 
-        for cedula, estudiante, pnf, materia, nota, estado, periodo, fecha in filas:
+        for cedula, nombre, apellido, pnfs in estudiantes:
             fila = ctk.CTkFrame(lista, fg_color="transparent")
+            fila.pack(fill="x", pady=2)
+
+            carreras_txt = ", ".join(pnfs) if pnfs else "Sin carrera asignada"
+            color_carreras = "#e2e8f0" if pnfs else "#64748b"
+
+            ctk.CTkLabel(fila, text=cedula,          width=100, font=ctk.CTkFont(size=11)).grid(row=0, column=0, padx=3)
+            ctk.CTkLabel(fila, text=f"{nombre} {apellido}", width=180, font=ctk.CTkFont(size=11)).grid(row=0, column=1, padx=3)
+            ctk.CTkLabel(fila, text=carreras_txt,    width=320, font=ctk.CTkFont(size=11),
+                         text_color=color_carreras).grid(row=0, column=2, padx=3)
+            ctk.CTkButton(
+                fila, text="Ver notas", width=85, height=26,
+                fg_color="transparent", border_width=1,
+                command=lambda c=cedula, n=f"{nombre} {apellido}": self._abrir_detalle_notas(c, n)
+            ).grid(row=0, column=3, padx=3)
+
+    def _abrir_detalle_notas(self, cedula, nombre_completo):
+        historial = database.obtener_notas_estudiante(cedula)
+
+        win = ctk.CTkToplevel(self)
+        win.title(f"Notas — {nombre_completo}")
+        win.geometry("720x500")
+        win.resizable(True, True)
+        win.grab_set()
+
+        ctk.CTkLabel(
+            win, text=nombre_completo,
+            font=ctk.CTkFont(size=15, weight="bold")
+        ).pack(pady=(16, 2))
+        ctk.CTkLabel(
+            win, text=f"Cédula: {cedula}",
+            font=ctk.CTkFont(size=11), text_color="gray"
+        ).pack(pady=(0, 10))
+
+        scroll = ctk.CTkScrollableFrame(win)
+        scroll.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+
+        if not historial:
+            ctk.CTkLabel(
+                scroll, text="Este estudiante no tiene notas cargadas.",
+                font=ctk.CTkFont(size=12), text_color="gray"
+            ).pack(pady=20)
+            return
+
+        for pnf_nombre, materias in historial.items():
+            # sección por PNF
+            ctk.CTkLabel(
+                scroll, text=pnf_nombre,
+                font=ctk.CTkFont(size=12, weight="bold"), text_color="#7dd3fc"
+            ).pack(anchor="w", pady=(10, 2))
+
+            cab = ctk.CTkFrame(scroll, fg_color="transparent")
+            cab.pack(fill="x")
+            for i, (txt, w) in enumerate([("Código", 90), ("Unidad Curricular", 320),
+                                           ("Tray.", 50), ("Mod.", 50), ("Nota", 50), ("Estado", 90)]):
+                ctk.CTkLabel(cab, text=txt, width=w,
+                             font=ctk.CTkFont(size=10, weight="bold"), text_color="gray").grid(row=0, column=i, padx=2)
+
+            for m in materias:
+                fila = ctk.CTkFrame(scroll, fg_color="transparent")
+                fila.pack(fill="x", pady=1)
+                nota_txt = str(m["nota"]) if m["nota"] is not None else "—"
+                color = "#2ecc71" if m["estado"] == "Aprobado" else ("#e74c3c" if m["estado"] == "Reprobado" else "gray")
+                for i, (val, w) in enumerate([
+                    (m["codigo"], 90), (m["unidad_curricular"], 320),
+                    (str(m["trayecto"]), 50), (str(m["modulo"]), 50),
+                    (nota_txt, 50), (m["estado"], 90)
+                ]):
+                    kwargs = {"text_color": color} if i == 5 else {}
+                    ctk.CTkLabel(fila, text=val, width=w,
+                                 font=ctk.CTkFont(size=11), **kwargs).grid(row=0, column=i, padx=2)
+
+    # ── tab historial de notas ───────────────────────────────────────────────────
+
+    def _construir_tab_historial(self, parent):
+        # barra de filtros
+        filtros = ctk.CTkFrame(parent, fg_color="transparent")
+        filtros.pack(fill="x", padx=8, pady=(10, 6))
+
+        ctk.CTkLabel(filtros, text="Filtrar:", font=ctk.CTkFont(size=11, weight="bold")).grid(row=0, column=0, padx=(0, 6))
+
+        self._entry_filtro_ced = ctk.CTkEntry(filtros, placeholder_text="Cédula", width=150, height=30)
+        self._entry_filtro_ced.grid(row=0, column=1, padx=4)
+
+        self._entry_filtro_mat = ctk.CTkEntry(filtros, placeholder_text="Materia", width=200, height=30)
+        self._entry_filtro_mat.grid(row=0, column=2, padx=4)
+
+        ctk.CTkButton(
+            filtros, text="Buscar", width=80, height=30,
+            command=self._aplicar_filtro_historial
+        ).grid(row=0, column=3, padx=4)
+
+        ctk.CTkButton(
+            filtros, text="Limpiar", width=75, height=30,
+            fg_color="transparent", border_width=1,
+            command=self._limpiar_filtro_historial
+        ).grid(row=0, column=4, padx=4)
+
+        # cabecera de tabla
+        cab = ctk.CTkFrame(parent, fg_color="transparent")
+        cab.pack(fill="x", padx=8, pady=(0, 2))
+        for i, (txt, w) in enumerate([("Cédula", 90), ("Estudiante", 160), ("PNF", 130),
+                                       ("Materia", 190), ("Nota", 50), ("Estado", 85), ("Período", 75), ("Cargado", 120)]):
+            ctk.CTkLabel(cab, text=txt, width=w,
+                         font=ctk.CTkFont(size=11, weight="bold"), text_color="gray").grid(row=0, column=i, padx=2)
+
+        # contenedor de filas (scrollable, reemplazable)
+        self._frame_historial = ctk.CTkScrollableFrame(parent)
+        self._frame_historial.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        self._poblar_historial()
+
+    def _poblar_historial(self, cedula=None, materia=None):
+        for w in self._frame_historial.winfo_children():
+            w.destroy()
+
+        filas = database.obtener_notas_recientes(50, cedula, materia)
+
+        if not filas:
+            ctk.CTkLabel(
+                self._frame_historial,
+                text="No se encontraron registros.",
+                font=ctk.CTkFont(size=12), text_color="gray"
+            ).pack(pady=20)
+            return
+
+        for cedula_r, estudiante, pnf, materia_r, nota, estado, periodo, fecha in filas:
+            fila = ctk.CTkFrame(self._frame_historial, fg_color="transparent")
             fila.pack(fill="x", pady=1)
             nota_txt = str(nota) if nota is not None else "—"
-            color_estado = "#2ecc71" if estado == "Aprobado" else ("#e74c3c" if estado == "Reprobado" else "gray")
+            fecha_corta = str(fecha)[:16] if fecha else "—"
+            color = "#2ecc71" if estado == "Aprobado" else ("#e74c3c" if estado == "Reprobado" else "gray")
             for i, (val, w) in enumerate([
-                (cedula, 90), (estudiante, 180), (pnf, 150),
-                (materia, 200), (nota_txt, 50), (estado, 90), (periodo or "—", 80)
+                (cedula_r, 90), (estudiante, 160), (pnf, 130),
+                (materia_r, 190), (nota_txt, 50), (estado, 85),
+                (periodo or "—", 75), (fecha_corta, 120)
             ]):
-                kwargs = {"text_color": color_estado} if i == 5 else {}
-                ctk.CTkLabel(fila, text=val, width=w, font=ctk.CTkFont(size=11),
-                             **kwargs).grid(row=0, column=i, padx=2)
+                kwargs = {"text_color": color} if i == 5 else {}
+                ctk.CTkLabel(fila, text=val, width=w,
+                             font=ctk.CTkFont(size=11), **kwargs).grid(row=0, column=i, padx=2)
+
+    def _aplicar_filtro_historial(self):
+        ced = self._entry_filtro_ced.get().strip() or None
+        mat = self._entry_filtro_mat.get().strip() or None
+        self._poblar_historial(ced, mat)
+
+    def _limpiar_filtro_historial(self):
+        self._entry_filtro_ced.delete(0, "end")
+        self._entry_filtro_mat.delete(0, "end")
+        self._poblar_historial()
 
     def _construir_tab_usuarios(self, parent):
         # lista

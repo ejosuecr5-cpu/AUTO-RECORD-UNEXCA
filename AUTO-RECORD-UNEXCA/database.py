@@ -85,6 +85,38 @@ def _asegurar_db():
                 conn.execute("ALTER TABLE materias_cursadas ADD COLUMN activo INTEGER NOT NULL DEFAULT 1")
                 conn.commit()
 
+            # Migración 6: tabla de expedientes generados
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS expedientes (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    estudiante_id    INTEGER NOT NULL REFERENCES estudiantes(id),
+                    pnf_id           INTEGER NOT NULL REFERENCES pnf(id),
+                    nivel            TEXT    NOT NULL
+                                              CHECK(nivel IN ('TSU','Licenciatura')),
+                    fecha_generacion TEXT    NOT NULL,
+                    ruta_pdf         TEXT    NOT NULL,
+                    sha256           TEXT    NOT NULL,
+                    status           TEXT    NOT NULL DEFAULT 'Vigente'
+                                              CHECK(status IN ('Vigente','Desactualizado'))
+                )
+            """)
+            conn.commit()
+
+            # Migración 7: nivel_superior en pnf (Licenciatura / Ingeniería)
+            cols_pnf = [r[1] for r in conn.execute("PRAGMA table_info(pnf)").fetchall()]
+            if 'nivel_superior' not in cols_pnf:
+                conn.execute(
+                    "ALTER TABLE pnf ADD COLUMN nivel_superior TEXT NOT NULL DEFAULT 'Licenciatura'"
+                )
+                # Informática y Distribución y Logística → Ingeniería
+                for row in conn.execute("SELECT id, nombre FROM pnf").fetchall():
+                    nom = row[1].lower()
+                    if any(kw in nom for kw in ('inform', 'logíst', 'logist', 'distribuc')):
+                        conn.execute(
+                            "UPDATE pnf SET nivel_superior='Ingeniería' WHERE id=?", (row[0],)
+                        )
+                conn.commit()
+
             # Migración 5: restaurar pnf_id NOT NULL en materias_cursadas
             # (cada nota —incluso trayecto inicial— está asociada a un PNF específico;
             #  si hay registros con pnf_id NULL de la migración anterior, se asignan
@@ -383,16 +415,32 @@ def buscar_estudiante(cedula, pnf_id=None):
         }
 
 def buscar_expediente_por_sha(sha):
+    """
+    Busca un expediente en la tabla expedientes por su hash SHA-256.
+    Retorna dict con información del expediente o None si no se encuentra.
+    """
     _asegurar_db()
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute("""
-            SELECT e.cedula, exp.pnf_id FROM expedientes exp
-            JOIN estudiantes e ON exp.estudiante_id = e.id
-            WHERE exp.firma_sha256 = ?
+            SELECT e.cedula, e.nombre, e.apellido,
+                   p.nombre, p.nivel_superior,
+                   ex.nivel, ex.fecha_generacion, ex.status
+            FROM expedientes ex
+            JOIN estudiantes e ON ex.estudiante_id = e.id
+            JOIN pnf p ON ex.pnf_id = p.id
+            WHERE ex.sha256 = ?
         """, (sha,)).fetchone()
         if not row:
             return None
-        return buscar_estudiante(row[0], row[1])
+        return {
+            'cedula':              row[0],
+            'nombre':              f"{row[1]} {row[2]}",
+            'pnf':                 row[3],
+            'nivel_superior_label': row[4],
+            'nivel':               row[5],
+            'fecha':               row[6],
+            'status':              row[7],
+        }
 
 def listar_estudiantes_con_inscripciones():
     """Retorna (cedula, nombre, apellido, [pnfs], activo)."""
@@ -686,6 +734,215 @@ def generar_plantilla_csv(tipo, destino):
     }
     with open(destino, 'w', newline='', encoding='utf-8') as f:
         f.write(';'.join(cabeceras[tipo]) + '\n')
+
+# ── expedientes ────────────────────────────────────────────────────────────────
+
+def obtener_pnfs_inscritos(cedula):
+    """
+    Retorna lista de (codigo, nombre, nivel_superior) de los PNF
+    en los que el estudiante tiene inscripción registrada.
+    """
+    _asegurar_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        est = conn.execute("SELECT id FROM estudiantes WHERE cedula=?", (cedula,)).fetchone()
+        if not est:
+            return []
+        return conn.execute("""
+            SELECT DISTINCT p.codigo, p.nombre, p.nivel_superior
+            FROM inscripciones i
+            JOIN pnf p ON i.pnf_id = p.id
+            WHERE i.estudiante_id = ?
+            ORDER BY p.nombre
+        """, (est[0],)).fetchall()
+
+
+def obtener_notas_para_expediente(cedula, pnf_codigo, nivel):
+    """
+    Retorna las notas aprobadas y activas del estudiante para el PNF+nivel dado,
+    estructuradas para la generación del PDF.
+
+    nivel: 'TSU'         → incluye trayectos 0, 1, 2
+           'Licenciatura' → incluye todos los trayectos
+
+    Retorna dict:
+    {
+        'pnf_nombre'          : str,
+        'nivel_superior_label': str,
+        'trayecto_inicial'    : [{'codigo', 'nombre', 'nota'}],
+        'trayectos': {
+            1: {
+                'anuales'    : [{'nombre', 'mod1', 'mod2', 'definitiva'}],
+                'semestrales': [{'codigo', 'nombre', 'nota'}]
+            },
+            ...
+        }
+    }
+    """
+    _asegurar_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        est = conn.execute("SELECT id FROM estudiantes WHERE cedula=?", (cedula,)).fetchone()
+        if not est:
+            raise ValueError(f"Estudiante '{cedula}' no encontrado.")
+
+        pnf = conn.execute(
+            "SELECT id, nombre, nivel_superior FROM pnf WHERE codigo=?", (pnf_codigo.upper(),)
+        ).fetchone()
+        if not pnf:
+            raise ValueError(f"PNF '{pnf_codigo}' no encontrado.")
+        pnf_id, pnf_nombre, nivel_superior_label = pnf
+
+        filtro_tray = "AND uc.trayecto IN (0,1,2)" if nivel == 'TSU' else ""
+
+        filas = conn.execute(f"""
+            SELECT uc.codigo, uc.nombre, uc.trayecto, uc.modulo, mc.nota
+            FROM materias_cursadas mc
+            JOIN unidades_curriculares uc ON mc.unidad_id = uc.id
+            WHERE mc.estudiante_id = ?
+              AND mc.pnf_id = ?
+              AND mc.estado = 'Aprobado'
+              AND mc.activo = 1
+              {filtro_tray}
+            ORDER BY uc.trayecto, uc.modulo, uc.nombre
+        """, (est[0], pnf_id)).fetchall()
+
+        inicial     = []
+        por_trayecto = {}   # {num: {'anuales_raw': {base: {mod: (cod, nota)}}, 'semestrales': []}}
+
+        for codigo, nombre, trayecto, modulo, nota in filas:
+            if trayecto == 0:
+                inicial.append({'codigo': codigo, 'nombre': nombre, 'nota': nota})
+                continue
+
+            if trayecto not in por_trayecto:
+                por_trayecto[trayecto] = {'anuales_raw': {}, 'semestrales': []}
+
+            if modulo in (1, 2):
+                base = _base_nombre(nombre)
+                por_trayecto[trayecto]['anuales_raw'].setdefault(base, {})
+                por_trayecto[trayecto]['anuales_raw'][base][modulo] = (codigo, nota)
+            else:
+                por_trayecto[trayecto]['semestrales'].append(
+                    {'codigo': codigo, 'nombre': nombre, 'nota': nota}
+                )
+
+        # Resolver pares anuales
+        trayectos_final = {}
+        for tray_num, data in sorted(por_trayecto.items()):
+            anuales = []
+            for base_nombre_uc, mods in data['anuales_raw'].items():
+                cod1, nota1 = mods.get(1, (None, None))
+                cod2, nota2 = mods.get(2, (None, None))
+                if nota1 is not None and nota2 is not None:
+                    definitiva = round((nota1 + nota2) / 2, 2)
+                    anuales.append({
+                        'nombre': base_nombre_uc,
+                        'mod1': nota1, 'mod2': nota2, 'definitiva': definitiva
+                    })
+                else:
+                    # Módulo huérfano (no debería ocurrir) → semestral de emergencia
+                    data['semestrales'].append({
+                        'codigo': (cod1 or cod2 or ''),
+                        'nombre': base_nombre_uc,
+                        'nota':   nota1 or nota2
+                    })
+            trayectos_final[tray_num] = {
+                'anuales':    anuales,
+                'semestrales': data['semestrales'],
+            }
+
+        return {
+            'pnf_nombre':           pnf_nombre,
+            'nivel_superior_label': nivel_superior_label,
+            'trayecto_inicial':     inicial,
+            'trayectos':            trayectos_final,
+        }
+
+
+def hay_notas_aprobadas(cedula, pnf_codigo, nivel):
+    """
+    Devuelve True si el estudiante tiene al menos una nota aprobada+activa
+    para el PNF+nivel indicado.
+    """
+    _asegurar_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        est = conn.execute("SELECT id FROM estudiantes WHERE cedula=?", (cedula,)).fetchone()
+        if not est:
+            return False
+        pnf = conn.execute("SELECT id FROM pnf WHERE codigo=?", (pnf_codigo.upper(),)).fetchone()
+        if not pnf:
+            return False
+        filtro = "AND uc.trayecto IN (0,1,2)" if nivel == 'TSU' else ""
+        r = conn.execute(f"""
+            SELECT 1 FROM materias_cursadas mc
+            JOIN unidades_curriculares uc ON mc.unidad_id = uc.id
+            WHERE mc.estudiante_id=? AND mc.pnf_id=?
+              AND mc.estado='Aprobado' AND mc.activo=1
+              {filtro}
+            LIMIT 1
+        """, (est[0], pnf[0])).fetchone()
+        return r is not None
+
+
+def registrar_expediente(cedula, pnf_codigo, nivel, ruta_pdf, sha256):
+    """
+    Inserta un nuevo expediente como 'Vigente' y marca todos los anteriores
+    del mismo estudiante+PNF+nivel como 'Desactualizado'.
+    """
+    _asegurar_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        est = conn.execute("SELECT id FROM estudiantes WHERE cedula=?", (cedula,)).fetchone()
+        if not est:
+            raise ValueError(f"Estudiante '{cedula}' no encontrado.")
+        pnf = conn.execute("SELECT id FROM pnf WHERE codigo=?", (pnf_codigo.upper(),)).fetchone()
+        if not pnf:
+            raise ValueError(f"PNF '{pnf_codigo}' no encontrado.")
+
+        fecha = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        conn.execute("""
+            UPDATE expedientes SET status='Desactualizado'
+            WHERE estudiante_id=? AND pnf_id=? AND nivel=?
+        """, (est[0], pnf[0], nivel))
+
+        conn.execute("""
+            INSERT INTO expedientes
+                (estudiante_id, pnf_id, nivel, fecha_generacion, ruta_pdf, sha256, status)
+            VALUES (?, ?, ?, ?, ?, ?, 'Vigente')
+        """, (est[0], pnf[0], nivel, fecha, ruta_pdf, sha256))
+        conn.commit()
+
+
+def listar_expedientes_estudiante(cedula):
+    """
+    Retorna lista de dicts con el historial de expedientes del estudiante,
+    del más reciente al más antiguo.
+    """
+    _asegurar_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        est = conn.execute("SELECT id FROM estudiantes WHERE cedula=?", (cedula,)).fetchone()
+        if not est:
+            return []
+        rows = conn.execute("""
+            SELECT ex.id, p.nombre, p.nivel_superior, ex.nivel,
+                   ex.fecha_generacion, ex.ruta_pdf, ex.sha256, ex.status
+            FROM expedientes ex
+            JOIN pnf p ON ex.pnf_id = p.id
+            WHERE ex.estudiante_id = ?
+            ORDER BY ex.fecha_generacion DESC
+        """, (est[0],)).fetchall()
+        return [
+            {
+                'id':                 r[0],
+                'pnf_nombre':         r[1],
+                'nivel_superior_label': r[2],
+                'nivel':              r[3],
+                'fecha':              r[4],
+                'ruta_pdf':           r[5],
+                'sha256':             r[6],
+                'status':             r[7],
+            }
+            for r in rows
+        ]
 
 # ── dar de baja / reactivar ────────────────────────────────────────────────────
 

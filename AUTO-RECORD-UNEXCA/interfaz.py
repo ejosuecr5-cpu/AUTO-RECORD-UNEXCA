@@ -177,165 +177,337 @@ class App(ctk.CTk):
             return
         self._cedula_actual = cedula
         self._datos_actuales = datos
-        self.mostrar_opciones_estudiante()
+        self._cargar_modulo_estudiante()
 
-    def mostrar_opciones_estudiante(self):
+    # ── módulo estudiante: estructura ───────────────────────────────────────────
+
+    def _cargar_modulo_estudiante(self):
         self._limpiar()
-        self.geometry("500x310")
-
-        self._btn_volver(self, self.mostrar_cedula)
+        self.geometry("940x580")
 
         pers = self._datos_actuales["datos_personales"]
-        ctk.CTkLabel(
-            self, text=f"Bienvenido, {pers['nombre']} {pers['apellido']}",
-            font=ctk.CTkFont(size=17, weight="bold")
-        ).pack(pady=(18, 4))
-        ctk.CTkLabel(
-            self, text=f"Cédula: {pers['cedula']}",
-            font=ctk.CTkFont(size=12), text_color="gray"
-        ).pack(pady=(0, 30))
+        nombre_est = f"{pers['nombre']} {pers['apellido']}"
 
-        ctk.CTkButton(
-            self, text="Exportar mi expediente (PDF)",
-            width=280, height=42,
-            command=self._exportar_pdf
-        ).pack(pady=6)
+        # Encabezado persistente
+        hdr = ctk.CTkFrame(self, height=48, fg_color="transparent")
+        hdr.pack(fill="x", padx=20, pady=(12, 0))
+        hdr.pack_propagate(False)
 
-        ctk.CTkButton(
-            self, text="Validar integridad (SHA-256)",
-            width=280, height=42,
-            fg_color="transparent", border_width=1,
-            command=self.mostrar_validar_sha
-        ).pack(pady=6)
+        ctk.CTkLabel(hdr, text="AUTO-RECORD UNEXCA",
+                     font=ctk.CTkFont(size=15, weight="bold")).pack(side="left")
+        ctk.CTkLabel(hdr, text=f"  {nombre_est}  ·  {self._cedula_actual}",
+                     font=ctk.CTkFont(size=11), text_color="gray").pack(side="left")
+        ctk.CTkButton(hdr, text="Cerrar sesión", width=110, height=28,
+                      fg_color="transparent", border_width=1,
+                      command=self.mostrar_login).pack(side="right")
 
-    def _exportar_pdf(self):
+        ctk.CTkFrame(self, height=1, fg_color="gray").pack(fill="x", padx=0, pady=(8, 0))
+
+        self._frame_cuerpo_est = ctk.CTkFrame(self, fg_color="transparent")
+        self._frame_cuerpo_est.pack(fill="both", expand=True)
+
+        self._mostrar_dashboard_estudiante()
+
+    def _limpiar_cuerpo_est(self):
+        for w in self._frame_cuerpo_est.winfo_children():
+            w.destroy()
+
+    # ── dashboard estudiante ────────────────────────────────────────────────────
+
+    def _mostrar_dashboard_estudiante(self):
+        self._limpiar_cuerpo_est()
+
+        pers = self._datos_actuales["datos_personales"]
+        ctk.CTkLabel(self._frame_cuerpo_est,
+                     text=f"Bienvenido, {pers['nombre']} {pers['apellido']}",
+                     font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(42, 4))
+        ctk.CTkLabel(self._frame_cuerpo_est, text="¿Qué desea hacer?",
+                     font=ctk.CTkFont(size=12), text_color="gray").pack(pady=(0, 38))
+
+        secciones = [
+            ("registro",  "Generar\nExpediente"),
+            ("historial", "Mis\nExpedientes"),
+            ("usuarios",  "Validar\nIntegridad SHA"),
+        ]
+        fila = ctk.CTkFrame(self._frame_cuerpo_est, fg_color="transparent")
+        fila.pack()
+        for col, (forma, etiqueta) in enumerate(secciones):
+            ctk.CTkButton(
+                fila, text=etiqueta, image=self._icono(forma),
+                compound="top", width=185, height=160, corner_radius=16,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                command=lambda n=forma: self._abrir_seccion_est(n)
+            ).grid(row=0, column=col, padx=18)
+
+    def _abrir_seccion_est(self, nombre):
+        self._limpiar_cuerpo_est()
+
+        titulos = {
+            "registro":  "Generar Expediente",
+            "historial": "Mis Expedientes",
+            "usuarios":  "Validar Integridad SHA",
+        }
+        barra = ctk.CTkFrame(self._frame_cuerpo_est, fg_color="transparent")
+        barra.pack(fill="x", padx=20, pady=(14, 6))
+        ctk.CTkLabel(barra, text=titulos.get(nombre, nombre),
+                     font=ctk.CTkFont(size=16, weight="bold")).pack(side="left")
+        ctk.CTkButton(barra, text="← Menú principal", width=140, height=28,
+                      fg_color="transparent", border_width=1,
+                      command=self._mostrar_dashboard_estudiante).pack(side="right")
+
+        contenido = ctk.CTkFrame(self._frame_cuerpo_est, fg_color="transparent")
+        contenido.pack(fill="both", expand=True, padx=10, pady=4)
+
+        if nombre == "registro":
+            self._seccion_est_generar(contenido)
+        elif nombre == "historial":
+            self._seccion_est_historial(contenido)
+        elif nombre == "usuarios":
+            self._seccion_est_sha(contenido)
+
+    # ── sección: generar expediente ─────────────────────────────────────────────
+
+    def _seccion_est_generar(self, parent):
+        pnfs = database.obtener_pnfs_inscritos(self._cedula_actual)
+
+        if not pnfs:
+            ctk.CTkLabel(parent,
+                text="No tienes carreras inscritas.\nContacta a Control de Estudios.",
+                font=ctk.CTkFont(size=12), text_color="gray"
+            ).pack(pady=60)
+            return
+
+        frame = ctk.CTkFrame(parent, fg_color="transparent")
+        frame.pack(expand=True, pady=24)
+
+        pnf_opciones = [f"{cod} – {nom}" for cod, nom, _ in pnfs]
+        self._gen_pnf_map = {f"{cod} – {nom}": (cod, nom, niv) for cod, nom, niv in pnfs}
+
+        ctk.CTkLabel(frame, text="Carrera (PNF):",
+                     font=ctk.CTkFont(size=11, weight="bold")).grid(
+            row=0, column=0, sticky="e", padx=(0, 12), pady=10)
+        self._gen_pnf_combo = ctk.CTkComboBox(frame, values=pnf_opciones, width=360, height=34)
+        self._gen_pnf_combo.set(pnf_opciones[0])
+        self._gen_pnf_combo.grid(row=0, column=1, pady=10, sticky="w")
+
+        ctk.CTkLabel(frame, text="Nivel académico:",
+                     font=ctk.CTkFont(size=11, weight="bold")).grid(
+            row=1, column=0, sticky="e", padx=(0, 12), pady=10)
+        self._gen_nivel_combo = ctk.CTkComboBox(
+            frame, values=["TSU", "Licenciatura"], width=200, height=34
+        )
+        self._gen_nivel_combo.set("TSU")
+        self._gen_nivel_combo.grid(row=1, column=1, pady=10, sticky="w")
+
+        self._gen_lbl_msg = ctk.CTkLabel(frame, text="",
+                                          font=ctk.CTkFont(size=10), text_color="gray")
+        self._gen_lbl_msg.grid(row=2, column=0, columnspan=2, pady=4)
+
+        ctk.CTkButton(frame, text="Generar Expediente", width=260, height=38,
+                      command=self._ejecutar_generar_expediente).grid(
+            row=3, column=0, columnspan=2, pady=16)
+
+    def _ejecutar_generar_expediente(self):
+        pnf_sel = self._gen_pnf_combo.get()
+        nivel   = self._gen_nivel_combo.get()
+        cedula  = self._cedula_actual
+
+        if pnf_sel not in self._gen_pnf_map:
+            messagebox.showwarning("Advertencia", "Seleccione una carrera válida.")
+            return
+
+        pnf_cod, pnf_nom, _ = self._gen_pnf_map[pnf_sel]
+
+        if not database.hay_notas_aprobadas(cedula, pnf_cod, nivel):
+            messagebox.showwarning(
+                "Sin notas aprobadas",
+                f"No tienes notas aprobadas para {pnf_nom} ({nivel}).\n"
+                "El expediente no puede generarse hasta tener al menos una materia aprobada."
+            )
+            return
+
         try:
-            nombre = pdf.generar_pdf(self._cedula_actual, self._datos_actuales)
-            messagebox.showinfo("Expediente generado", f"PDF guardado como:\n{nombre}")
-        except Exception as e:
-            messagebox.showerror("Error al generar PDF", str(e))
+            datos_est = database.buscar_estudiante(cedula)["datos_personales"]
+            notas     = database.obtener_notas_para_expediente(cedula, pnf_cod, nivel)
+            ruta, sha = pdf.generar_expediente(cedula, pnf_cod, nivel, datos_est, notas)
+            database.registrar_expediente(cedula, pnf_cod, nivel, ruta, sha)
 
-    # ── validar SHA ─────────────────────────────────────────────────────────────
-
-    def mostrar_validar_sha(self):
-        self._limpiar()
-        self.geometry("580x460")
-
-        self._btn_volver(self, self.mostrar_opciones_estudiante)
-
-        ctk.CTkLabel(
-            self, text="Validación de Integridad",
-            font=ctk.CTkFont(size=17, weight="bold")
-        ).pack(pady=(18, 4))
-        ctk.CTkLabel(
-            self, text="Ingrese el código SHA-256 o seleccione el archivo PDF",
-            font=ctk.CTkFont(size=12), text_color="gray"
-        ).pack(pady=(0, 14))
-
-        fila_sha = ctk.CTkFrame(self, fg_color="transparent")
-        fila_sha.pack(pady=4)
-        self.entry_sha = ctk.CTkEntry(
-            fila_sha, placeholder_text="SHA-256 del expediente...",
-            width=360, height=34
-        )
-        self.entry_sha.grid(row=0, column=0, padx=(0, 8))
-        self.entry_sha.bind("<Return>", lambda _: self._verificar_por_sha())
-        ctk.CTkButton(
-            fila_sha, text="Verificar", width=90, height=34,
-            command=self._verificar_por_sha
-        ).grid(row=0, column=1)
-
-        ctk.CTkLabel(
-            self, text="— o —",
-            font=ctk.CTkFont(size=11), text_color="gray"
-        ).pack(pady=6)
-
-        ctk.CTkButton(
-            self, text="Seleccionar archivo PDF",
-            width=200, height=34,
-            fg_color="transparent", border_width=1,
-            command=self._verificar_por_archivo
-        ).pack(pady=4)
-
-        self.lbl_resultado = ctk.CTkLabel(self, text="", font=ctk.CTkFont(size=12))
-        self.lbl_resultado.pack(pady=(12, 4))
-
-        self.txt_resultado = ctk.CTkTextbox(
-            self, height=155,
-            font=ctk.CTkFont(family="Courier", size=11)
-        )
-        self.txt_resultado.pack(fill="x", padx=20, pady=(0, 10))
-        self.txt_resultado.configure(state="disabled")
-
-    def _mostrar_resultado(self, es_valido, datos=None):
-        self.txt_resultado.configure(state="normal")
-        self.txt_resultado.delete("0.0", "end")
-
-        if es_valido and datos:
-            self.lbl_resultado.configure(
-                text="Documento auténtico · Integridad verificada",
+            self._gen_lbl_msg.configure(
+                text=f"Guardado: {os.path.basename(ruta)}",
                 text_color="#2ecc71"
             )
-            pers = datos["datos_personales"]
-            lineas = [
-                f"Estudiante : {pers['nombre']} {pers['apellido']}",
-                "",
-                f"{'Código':<12} {'Unidad Curricular':<36} {'Nota':>5}  Estado",
-                "─" * 68,
-            ]
-            for uc in datos["historial_academico"]:
-                lineas.append(
-                    f"{uc['codigo']:<12} {uc['unidad_curricular']:<36} {str(uc['nota']):>5}  {uc['estado']}"
-                )
-            self.txt_resultado.insert("0.0", "\n".join(lineas))
-        elif es_valido:
-            self.lbl_resultado.configure(
-                text="Documento auténtico · Sin datos de auditoría en la BD",
-                text_color="#f0a500"
+            messagebox.showinfo(
+                "Expediente generado",
+                f"El expediente fue guardado exitosamente en:\n{ruta}\n\n"
+                f"SHA-256: {sha[:48]}…"
             )
-            self.txt_resultado.insert("0.0", "El hash coincide pero el expediente no está registrado.")
-        else:
-            self.lbl_resultado.configure(
-                text="Verificación fallida · El documento pudo ser alterado",
-                text_color="#e74c3c"
-            )
-            self.txt_resultado.insert("0.0", "El hash no coincide o no se encontró el expediente.")
-
-        self.txt_resultado.configure(state="disabled")
-
-    def _verificar_por_sha(self):
-        sha = self.entry_sha.get().strip()
-        if not sha:
-            messagebox.showwarning("Advertencia", "Ingrese el código SHA-256.")
-            return
-        try:
-            datos = database.buscar_expediente_por_sha(sha)
         except Exception as e:
-            messagebox.showerror("Error", str(e))
-            return
-        self._mostrar_resultado(datos is not None, datos)
+            messagebox.showerror("Error al generar", str(e))
 
-    def _verificar_por_archivo(self):
+    # ── sección: mis expedientes ────────────────────────────────────────────────
+
+    def _seccion_est_historial(self, parent):
+        import shutil as _shutil
+
+        expedientes = database.listar_expedientes_estudiante(self._cedula_actual)
+
+        cab = ctk.CTkFrame(parent, fg_color="transparent")
+        cab.pack(fill="x", padx=8, pady=(4, 2))
+        for i, (txt, w) in enumerate([
+            ("Carrera", 200), ("Nivel", 140), ("Generado", 135), ("Status", 90), ("", 100)
+        ]):
+            ctk.CTkLabel(cab, text=txt, width=w,
+                         font=ctk.CTkFont(size=11, weight="bold"), text_color="gray").grid(
+                row=0, column=i, padx=3)
+
+        lista = ctk.CTkScrollableFrame(parent)
+        lista.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        if not expedientes:
+            ctk.CTkLabel(lista, text="No has generado expedientes aún.",
+                         font=ctk.CTkFont(size=12), text_color="gray").pack(pady=28)
+            return
+
+        for exp in expedientes:
+            if exp['nivel'] == 'TSU':
+                titulo_nivel = "Técnico Superior Universitario"
+            else:
+                titulo_nivel = exp['nivel_superior_label']
+
+            color_status = "#2ecc71" if exp['status'] == 'Vigente' else "#f59e0b"
+
+            fila = ctk.CTkFrame(lista, fg_color="transparent")
+            fila.pack(fill="x", pady=2)
+
+            ctk.CTkLabel(fila, text=exp['pnf_nombre'], width=200,
+                         font=ctk.CTkFont(size=11), anchor="w").grid(row=0, column=0, padx=3)
+            ctk.CTkLabel(fila, text=titulo_nivel, width=140,
+                         font=ctk.CTkFont(size=10), anchor="w").grid(row=0, column=1, padx=3)
+            ctk.CTkLabel(fila, text=exp['fecha'][:16], width=135,
+                         font=ctk.CTkFont(size=10)).grid(row=0, column=2, padx=3)
+            ctk.CTkLabel(fila, text=exp['status'], width=90,
+                         font=ctk.CTkFont(size=10, weight="bold"),
+                         text_color=color_status).grid(row=0, column=3, padx=3)
+            ctk.CTkButton(
+                fila, text="Descargar", width=95, height=26,
+                fg_color="transparent", border_width=1,
+                font=ctk.CTkFont(size=10),
+                command=lambda ruta=exp['ruta_pdf']: self._descargar_expediente(ruta)
+            ).grid(row=0, column=4, padx=3)
+
+    def _descargar_expediente(self, ruta_original):
+        import shutil
+        if not os.path.exists(ruta_original):
+            messagebox.showerror(
+                "Archivo no encontrado",
+                f"El archivo ya no está disponible en:\n{ruta_original}\n\n"
+                "Puede generar un nuevo expediente desde 'Generar Expediente'."
+            )
+            return
+        destino = filedialog.asksaveasfilename(
+            title="Guardar copia del expediente",
+            defaultextension=".pdf",
+            initialfile=os.path.basename(ruta_original),
+            filetypes=[("PDF", "*.pdf")]
+        )
+        if destino:
+            shutil.copy2(ruta_original, destino)
+            messagebox.showinfo("Descarga completada", f"Expediente guardado en:\n{destino}")
+
+    # ── sección: validar SHA ────────────────────────────────────────────────────
+
+    def _seccion_est_sha(self, parent):
+        frame = ctk.CTkFrame(parent, fg_color="transparent")
+        frame.pack(expand=True, pady=20)
+
+        ctk.CTkLabel(
+            frame,
+            text="Seleccione el archivo PDF del expediente para verificar su autenticidad.",
+            font=ctk.CTkFont(size=11), text_color="gray"
+        ).pack(pady=(0, 18))
+
+        resultado_frame = ctk.CTkFrame(frame, fg_color="transparent")
+
+        ctk.CTkButton(
+            frame, text="Seleccionar archivo PDF…", width=260, height=36,
+            command=lambda: self._verificar_sha_archivo(resultado_frame)
+        ).pack(pady=8)
+
+        resultado_frame.pack(fill="x", pady=14)
+
+    def _verificar_sha_archivo(self, resultado_frame):
         ruta = filedialog.askopenfilename(
             title="Seleccionar expediente PDF",
             filetypes=[("Archivos PDF", "*.pdf")]
         )
         if not ruta:
             return
+
+        for w in resultado_frame.winfo_children():
+            w.destroy()
+
         try:
             with open(ruta, "rb") as f:
-                sha_calculado = hashlib.sha256(f.read()).hexdigest()
-            datos = database.buscar_expediente_por_sha(sha_calculado)
-            if datos:
-                self._mostrar_resultado(True, datos)
-                return
-            try:
-                es_valido = firma.verificar_integridad(ruta)
-                self._mostrar_resultado(es_valido)
-            except FileNotFoundError:
-                self._mostrar_resultado(False)
+                sha = hashlib.sha256(f.read()).hexdigest()
+
+            info = database.buscar_expediente_por_sha(sha)
+
+            if info:
+                ctk.CTkLabel(resultado_frame,
+                    text="Documento auténtico · Integridad verificada",
+                    font=ctk.CTkFont(size=13, weight="bold"), text_color="#2ecc71"
+                ).pack(pady=(0, 8))
+                color_status = "#2ecc71" if info['status'] == 'Vigente' else "#f59e0b"
+                lineas = [
+                    f"Estudiante: {info['nombre']}  ·  {info['cedula']}",
+                    f"Carrera: {info['pnf']}",
+                    f"Nivel: {info['nivel']}",
+                    f"Fecha de generación: {info['fecha']}",
+                ]
+                for linea in lineas:
+                    ctk.CTkLabel(resultado_frame, text=linea,
+                                 font=ctk.CTkFont(size=10), text_color="gray").pack()
+                ctk.CTkLabel(resultado_frame,
+                    text=f"Status: {info['status']}",
+                    font=ctk.CTkFont(size=10, weight="bold"), text_color=color_status
+                ).pack(pady=2)
+                ctk.CTkLabel(resultado_frame,
+                    text=f"SHA-256: {sha}",
+                    font=ctk.CTkFont(family="Courier", size=8), text_color="gray"
+                ).pack()
+            else:
+                # Intentar verificar contra archivo .sha legacy (expedientes anteriores)
+                ruta_sha = ruta.replace('.pdf', '.sha')
+                if os.path.exists(ruta_sha):
+                    with open(ruta_sha) as f:
+                        sha_guardado = f.read().strip()
+                    if sha == sha_guardado:
+                        ctk.CTkLabel(resultado_frame,
+                            text="Documento íntegro (no registrado en el sistema actual)",
+                            font=ctk.CTkFont(size=12, weight="bold"), text_color="#f59e0b"
+                        ).pack(pady=(0, 4))
+                    else:
+                        ctk.CTkLabel(resultado_frame,
+                            text="Verificación fallida · El documento pudo ser alterado",
+                            font=ctk.CTkFont(size=12, weight="bold"), text_color="#e74c3c"
+                        ).pack()
+                else:
+                    ctk.CTkLabel(resultado_frame,
+                        text="Documento no encontrado en el sistema",
+                        font=ctk.CTkFont(size=12, weight="bold"), text_color="#e74c3c"
+                    ).pack(pady=(0, 4))
+                    ctk.CTkLabel(resultado_frame,
+                        text="No se puede verificar la autenticidad de este archivo.",
+                        font=ctk.CTkFont(size=10), text_color="gray"
+                    ).pack()
+                ctk.CTkLabel(resultado_frame,
+                    text=f"SHA-256 calculado: {sha}",
+                    font=ctk.CTkFont(family="Courier", size=8), text_color="gray"
+                ).pack(pady=(4, 0))
+
         except Exception as e:
-            messagebox.showerror("Error", str(e))
+            ctk.CTkLabel(resultado_frame, text=f"Error: {e}",
+                         text_color="#e74c3c").pack()
 
     # ── login control de estudios ───────────────────────────────────────────────
 

@@ -85,22 +85,16 @@ def _asegurar_db():
                 conn.execute("ALTER TABLE materias_cursadas ADD COLUMN activo INTEGER NOT NULL DEFAULT 1")
                 conn.commit()
 
-            # Migración 6: tabla de expedientes generados
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS expedientes (
-                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-                    estudiante_id    INTEGER NOT NULL REFERENCES estudiantes(id),
-                    pnf_id           INTEGER NOT NULL REFERENCES pnf(id),
-                    nivel            TEXT    NOT NULL
-                                              CHECK(nivel IN ('TSU','Licenciatura')),
-                    fecha_generacion TEXT    NOT NULL,
-                    ruta_pdf         TEXT    NOT NULL,
-                    sha256           TEXT    NOT NULL,
-                    status           TEXT    NOT NULL DEFAULT 'Vigente'
-                                              CHECK(status IN ('Vigente','Desactualizado'))
+            # Migración 6: agregar columna 'nivel' a la tabla expedientes existente.
+            # La tabla ya existe en la BD con columnas: id, estudiante_id, pnf_id,
+            # nombre_archivo, ruta_pdf, firma_sha256, fecha_generacion, generado_por, estado.
+            # Solo falta 'nivel' para distinguir TSU de Licenciatura.
+            cols_exp = [r[1] for r in conn.execute("PRAGMA table_info(expedientes)").fetchall()]
+            if 'nivel' not in cols_exp:
+                conn.execute(
+                    "ALTER TABLE expedientes ADD COLUMN nivel TEXT NOT NULL DEFAULT 'TSU'"
                 )
-            """)
-            conn.commit()
+                conn.commit()
 
             # Migración 7: nivel_superior en pnf (Licenciatura / Ingeniería)
             cols_pnf = [r[1] for r in conn.execute("PRAGMA table_info(pnf)").fetchall()]
@@ -424,22 +418,22 @@ def buscar_expediente_por_sha(sha):
         row = conn.execute("""
             SELECT e.cedula, e.nombre, e.apellido,
                    p.nombre, p.nivel_superior,
-                   ex.nivel, ex.fecha_generacion, ex.status
+                   ex.nivel, ex.fecha_generacion, ex.estado
             FROM expedientes ex
             JOIN estudiantes e ON ex.estudiante_id = e.id
             JOIN pnf p ON ex.pnf_id = p.id
-            WHERE ex.sha256 = ?
+            WHERE ex.firma_sha256 = ?
         """, (sha,)).fetchone()
         if not row:
             return None
         return {
-            'cedula':              row[0],
-            'nombre':              f"{row[1]} {row[2]}",
-            'pnf':                 row[3],
+            'cedula':               row[0],
+            'nombre':               f"{row[1]} {row[2]}",
+            'pnf':                  row[3],
             'nivel_superior_label': row[4],
-            'nivel':               row[5],
-            'fecha':               row[6],
-            'status':              row[7],
+            'nivel':                row[5],
+            'fecha':                row[6],
+            'status':               row[7],   # alias de 'estado' para interfaz.py
         }
 
 def listar_estudiantes_con_inscripciones():
@@ -791,7 +785,8 @@ def obtener_notas_para_expediente(cedula, pnf_codigo, nivel):
             raise ValueError(f"PNF '{pnf_codigo}' no encontrado.")
         pnf_id, pnf_nombre, nivel_superior_label = pnf
 
-        filtro_tray = "AND uc.trayecto IN (0,1,2)" if nivel == 'TSU' else ""
+        # trayecto es columna TEXT en la BD ('0','1','2'…); comparar como strings.
+        filtro_tray = "AND uc.trayecto IN ('0','1','2')" if nivel == 'TSU' else ""
 
         filas = conn.execute(f"""
             SELECT uc.codigo, uc.nombre, uc.trayecto, uc.modulo, mc.nota
@@ -809,7 +804,9 @@ def obtener_notas_para_expediente(cedula, pnf_codigo, nivel):
         por_trayecto = {}   # {num: {'anuales_raw': {base: {mod: (cod, nota)}}, 'semestrales': []}}
 
         for codigo, nombre, trayecto, modulo, nota in filas:
-            if trayecto == 0:
+            # trayecto viene como string de la BD; normalizar a int para usar como clave
+            tray_int = int(trayecto) if str(trayecto).isdigit() else 0
+            if tray_int == 0:
                 inicial.append({'codigo': codigo, 'nombre': nombre, 'nota': nota})
                 continue
 
@@ -871,7 +868,7 @@ def hay_notas_aprobadas(cedula, pnf_codigo, nivel):
         pnf = conn.execute("SELECT id FROM pnf WHERE codigo=?", (pnf_codigo.upper(),)).fetchone()
         if not pnf:
             return False
-        filtro = "AND uc.trayecto IN (0,1,2)" if nivel == 'TSU' else ""
+        filtro = "AND uc.trayecto IN ('0','1','2')" if nivel == 'TSU' else ""
         r = conn.execute(f"""
             SELECT 1 FROM materias_cursadas mc
             JOIN unidades_curriculares uc ON mc.unidad_id = uc.id
@@ -897,18 +894,21 @@ def registrar_expediente(cedula, pnf_codigo, nivel, ruta_pdf, sha256):
         if not pnf:
             raise ValueError(f"PNF '{pnf_codigo}' no encontrado.")
 
-        fecha = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        fecha        = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        nombre_arch  = os.path.basename(ruta_pdf)
 
+        # 'estado' y 'firma_sha256' son los nombres reales de la BD
         conn.execute("""
-            UPDATE expedientes SET status='Desactualizado'
+            UPDATE expedientes SET estado='Desactualizado'
             WHERE estudiante_id=? AND pnf_id=? AND nivel=?
         """, (est[0], pnf[0], nivel))
 
         conn.execute("""
             INSERT INTO expedientes
-                (estudiante_id, pnf_id, nivel, fecha_generacion, ruta_pdf, sha256, status)
-            VALUES (?, ?, ?, ?, ?, ?, 'Vigente')
-        """, (est[0], pnf[0], nivel, fecha, ruta_pdf, sha256))
+                (estudiante_id, pnf_id, nivel, fecha_generacion,
+                 nombre_archivo, ruta_pdf, firma_sha256, estado)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'Vigente')
+        """, (est[0], pnf[0], nivel, fecha, nombre_arch, ruta_pdf, sha256))
         conn.commit()
 
 
@@ -924,7 +924,7 @@ def listar_expedientes_estudiante(cedula):
             return []
         rows = conn.execute("""
             SELECT ex.id, p.nombre, p.nivel_superior, ex.nivel,
-                   ex.fecha_generacion, ex.ruta_pdf, ex.sha256, ex.status
+                   ex.fecha_generacion, ex.ruta_pdf, ex.firma_sha256, ex.estado
             FROM expedientes ex
             JOIN pnf p ON ex.pnf_id = p.id
             WHERE ex.estudiante_id = ?
@@ -932,14 +932,14 @@ def listar_expedientes_estudiante(cedula):
         """, (est[0],)).fetchall()
         return [
             {
-                'id':                 r[0],
-                'pnf_nombre':         r[1],
+                'id':                   r[0],
+                'pnf_nombre':           r[1],
                 'nivel_superior_label': r[2],
-                'nivel':              r[3],
-                'fecha':              r[4],
-                'ruta_pdf':           r[5],
-                'sha256':             r[6],
-                'status':             r[7],
+                'nivel':                r[3],
+                'fecha':                r[4],
+                'ruta_pdf':             r[5],
+                'sha256':               r[6],   # alias de firma_sha256
+                'status':               r[7],   # alias de estado
             }
             for r in rows
         ]

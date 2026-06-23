@@ -230,7 +230,7 @@ def generar_expediente(cedula, pnf_codigo, nivel, datos_est, notas):
         if not anuales and not semestrales:
             continue
 
-        etiq = P.LABEL_TRAYECTO.format(n=_romano(tray_num))
+        etiq = P.LABEL_TRAYECTO.format(n=_romano(int(tray_num) if str(tray_num).isdigit() else 0))
         story.append(_banda_seccion(etiq, ancho, s_seccion))
         story.append(Spacer(1, 2))
 
